@@ -1,7 +1,7 @@
 # The iOS deployment target must match IPHONEOS_DEPLOYMENT_TARGET in
 # ios/Runner.xcodeproj/project.pbxproj and MinimumOSVersion in
-# ios/Flutter/AppFrameworkInfo.plist (currently 13.0).
-platform :ios, '13.0'
+# ios/Flutter/AppFrameworkInfo.plist (currently 15.0).
+platform :ios, '15.0'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
