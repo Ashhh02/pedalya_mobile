@@ -1,0 +1,185 @@
+# =============================================================================
+# Codemagic CI configuration - Pedalya (Flutter) iOS builds.
+#
+# SECURITY
+#   This file contains NO credentials. Apple distribution certificates,
+#   provisioning profiles and App Store Connect API keys must be configured in
+#   Codemagic (Team settings -> Code signing), never committed here.
+#   Never commit: *.p12, *.mobileprovision, *.p8, AuthKey_*.p8, Google service
+#   account JSON, or any .env file. .gitignore blocks all of them.
+#
+# WORKFLOWS
+#   ios-release      -> signed App Store / TestFlight .ipa
+#                       (requires Apple signing configured in Codemagic)
+#   ios-build-check  -> unsigned compile check, no Apple credentials needed.
+#                       Produces a .app (NOT an .ipa) so the iOS toolchain can
+#                       be validated before signing is set up.
+#
+# APPLE CREDENTIALS STILL REQUIRED FOR ios-release
+#   1. Paid Apple Developer Program membership.
+#   2. App ID "com.pedalya.app" registered in the Apple Developer portal.
+#   3. In Codemagic: Team settings -> Code signing -> iOS code signing
+#      certificates, add an "Apple Distribution" certificate for com.pedalya.app
+#      and an App Store provisioning profile for com.pedalya.app.
+#      (Alternatively add an App Store Connect API key integration and set
+#       `integrations: app_store_connect: <name>` under ios-release, which lets
+#       Codemagic create/rotate the profile automatically.)
+#   4. Optional: APP_STORE_APPLE_ID + App Store Connect integration to publish
+#      straight to TestFlight.
+# =============================================================================
+
+workflows:
+  # ---------------------------------------------------------------------------
+  # Signed release build -> .ipa artifact
+  # ---------------------------------------------------------------------------
+  ios-release:
+    name: Pedalya iOS Release
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.pedalya.app
+      # pubspec.yaml requires Dart SDK ^3.10.7, which means Flutter >= 3.38.
+      # "stable" always satisfies that; pin it (e.g. 3.38.7) for byte-identical
+      # rebuilds.
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    cache:
+      cache_paths:
+        - $FLUTTER_ROOT/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+    scripts:
+      - name: Show build toolchain
+        script: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - name: Get Flutter packages
+        script: flutter pub get
+
+      - name: Install CocoaPods dependencies
+        script: |
+          set -eo pipefail
+          cd ios
+          pod install
+
+      - name: Analyze Flutter project
+        script: flutter analyze
+
+      - name: Run Flutter tests
+        script: |
+          set -eo pipefail
+          if [ -d test ] && [ -n "$(find test -name '*_test.dart' -print -quit)" ]; then
+            flutter test
+          else
+            echo "No test directory found. Skipping tests."
+          fi
+
+      - name: Check Apple signing material
+        script: |
+          set -eo pipefail
+          if security find-identity -p codesigning -v 2>/dev/null | grep -q "Apple Distribution"; then
+            echo "Apple Distribution certificate is installed in the keychain."
+          else
+            echo "::warning::No 'Apple Distribution' certificate found in the keychain. ios-release needs one uploaded in Codemagic (Team settings -> Code signing). Run the 'Pedalya iOS Build Check' workflow to verify compilation without signing."
+          fi
+
+      - name: Set up provisioning profile settings on the Xcode project
+        script: xcode-project use-profiles
+
+      - name: Build iOS IPA
+        script: |
+          set -eo pipefail
+          VERSION_ARGS=""
+          if [ -n "${APP_VERSION:-}" ]; then
+            VERSION_ARGS="$VERSION_ARGS --build-name=$APP_VERSION"
+          fi
+          if [ -n "${APP_BUILD_NUMBER:-}" ]; then
+            VERSION_ARGS="$VERSION_ARGS --build-number=$APP_BUILD_NUMBER"
+          fi
+          EXPORT_PLIST="/Users/builder/export_options.plist"
+          if [ -f "$EXPORT_PLIST" ]; then
+            EXPORT_ARG="--export-options-plist=$EXPORT_PLIST"
+          else
+            echo "Codemagic did not generate $EXPORT_PLIST; using Flutter's default export method (app-store-connect)."
+            EXPORT_ARG=""
+          fi
+          flutter build ipa --release $VERSION_ARGS $EXPORT_ARG
+
+      - name: Verify IPA artifact
+        script: |
+          set -eo pipefail
+          IPA_DIR="build/ios/ipa"
+          if [ ! -d "$IPA_DIR" ]; then
+            echo "::error::Expected output directory $IPA_DIR was not created"
+            exit 1
+          fi
+          if ! ls -1 "$IPA_DIR"/*.ipa >/dev/null 2>&1; then
+            echo "::error::No .ipa was produced in $IPA_DIR"
+            exit 1
+          fi
+          ls -lh "$IPA_DIR"/*.ipa
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/ios/archive/Runner.xcarchive/dSYMs/Runner.app.dSYM
+
+  # ---------------------------------------------------------------------------
+  # Unsigned compile check -> .app artifact (no Apple credentials required)
+  # ---------------------------------------------------------------------------
+  ios-build-check:
+    name: Pedalya iOS Build Check
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    cache:
+      cache_paths:
+        - $FLUTTER_ROOT/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+    scripts:
+      - name: Show build toolchain
+        script: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - name: Get Flutter packages
+        script: flutter pub get
+
+      - name: Install CocoaPods dependencies
+        script: |
+          set -eo pipefail
+          cd ios
+          pod install
+
+      - name: Analyze Flutter project
+        script: flutter analyze
+
+      - name: Run Flutter tests
+        script: |
+          set -eo pipefail
+          if [ -d test ] && [ -n "$(find test -name '*_test.dart' -print -quit)" ]; then
+            flutter test
+          else
+            echo "No test directory found. Skipping tests."
+          fi
+
+      - name: Build unsigned iOS app (compile check)
+        script: flutter build ios --release --no-codesign
+
+      - name: Verify app artifact
+        script: |
+          set -eo pipefail
+          APP_DIR="build/ios/iphoneos"
+          if [ ! -d "$APP_DIR/Runner.app" ]; then
+            echo "::error::Expected $APP_DIR/Runner.app was not created"
+            exit 1
+          fi
+          du -sh "$APP_DIR/Runner.app"
+    artifacts:
+      - build/ios/iphoneos/Runner.app
